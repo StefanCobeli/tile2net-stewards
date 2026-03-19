@@ -354,7 +354,29 @@ def main():
         print(f"\nRasterizing suggestions to: {gt_dir}")
         rasterize_suggestions_to_gt(gdf, tile_ids, gt_dir)
 
-        # ── Step 4: Select device ──
+        # ── Step 4: Filter to tiles where GT differs from T2N ──
+        t2n_dir_path = Path(args.t2n_dir)
+        gt_dir_path = Path(gt_dir)
+        changed_tiles = []
+        unchanged = 0
+        for tid in tile_ids:
+            t2n_path = t2n_dir_path / f"{tid}.png"
+            gt_path = gt_dir_path / f"{tid}.png"
+            if not t2n_path.exists() or not gt_path.exists():
+                continue
+            t2n_mask = np.array(Image.open(t2n_path).convert("L"))
+            gt_mask = np.array(Image.open(gt_path).convert("L"))
+            if np.array_equal(t2n_mask, gt_mask):
+                unchanged += 1
+            else:
+                changed_tiles.append(tid)
+
+        print(f"  {len(changed_tiles)} tiles with changes, {unchanged} unchanged (skipped)")
+        train_tile_ids = changed_tiles if changed_tiles else tile_ids
+        if not changed_tiles:
+            print("  Warning: no tiles differ — training on all tiles")
+
+        # ── Step 5: Select device ──
         if torch.cuda.is_available():
             device = torch.device("cuda")
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -363,16 +385,16 @@ def main():
             device = torch.device("cpu")
         print(f"\nUsing device: {device}")
 
-        # ── Step 5: Train model ──
+        # ── Step 6: Train model ──
         print(f"\nTraining ResidualFixNet ({args.epochs} epochs, head={args.head})...")
         model = ResidualFixNet(enable_remove=args.enable_remove).to(device)
-        n = len(tile_ids)
+        n = len(train_tile_ids)
         bucket_info = {"all": {"total": n, "train": n, "val": n}}
 
         history, _, _, _ = train_model(
             model,
-            train_tile_ids=tile_ids,
-            val_ids=tile_ids,
+            train_tile_ids=train_tile_ids,
+            val_ids=train_tile_ids,
             bucket_info=bucket_info,
             device=device,
             n_epochs=args.epochs,
