@@ -168,12 +168,21 @@ def run_inference(model, tile_ids, device, head, tiles_dir, t2n_dir, conf_dir):
         input_tensor = torch.from_numpy(input_np).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            pred_full, pred_fix = model(input_tensor)
+            outputs = model(input_tensor)
+            if len(outputs) == 3:
+                pred_full, pred_fix, pred_remove = outputs
+            else:
+                pred_full, pred_fix = outputs
+                pred_remove = None
 
         if head == "fix":
             pred_np = pred_fix[0, 0].cpu().numpy()
             t2n_binary = t2n_ch > 0.5
-            corrected = (t2n_binary | (pred_np > 0.5)).astype(np.uint8) * 255
+            if pred_remove is not None:
+                pred_remove_np = pred_remove[0, 0].cpu().numpy()
+                corrected = ((t2n_binary & ~(pred_remove_np > 0.5)) | (pred_np > 0.5)).astype(np.uint8) * 255
+            else:
+                corrected = (t2n_binary | (pred_np > 0.5)).astype(np.uint8) * 255
         else:
             pred_np = pred_full[0, 0].cpu().numpy()
             corrected = (pred_np > 0.5).astype(np.uint8) * 255
@@ -317,6 +326,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=200, help="Training epochs (default: 200)")
     parser.add_argument("--head", choices=["fix", "full"], default="fix",
                         help="Model head to use (default: fix)")
+    parser.add_argument("--enable_remove", action="store_true",
+                        help="Enable remove head (add+remove mode)")
     args = parser.parse_args()
 
     # ── Step 1: Load input GeoJSON ──
@@ -354,7 +365,7 @@ def main():
 
         # ── Step 5: Train model ──
         print(f"\nTraining ResidualFixNet ({args.epochs} epochs, head={args.head})...")
-        model = ResidualFixNet().to(device)
+        model = ResidualFixNet(enable_remove=args.enable_remove).to(device)
         n = len(tile_ids)
         bucket_info = {"all": {"total": n, "train": n, "val": n}}
 

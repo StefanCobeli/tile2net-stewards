@@ -1,6 +1,6 @@
 # Stewards Scripts
 
-Three scripts for training and applying sidewalk polygon fix models.
+Two scripts for training and applying sidewalk polygon fix models.
 
 ## Scripts
 
@@ -11,47 +11,40 @@ Takes a GeoJSON of polygon suggestions, trains a ResidualFixNet model, runs infe
 ```bash
 python stewards_scripts/train_from_suggestions.py \
     --geojson ./suggestion_sample.geojson \
-    --tiles_dir ./path/to/tiles \
-    --t2n_dir ./path/to/masks_tile2net_polygons \
-    --conf_dir ./path/to/masks_confidence \
+    --tiles_dir /path/to/tiles \
+    --t2n_dir /path/to/masks_tile2net_polygons \
+    --conf_dir /path/to/masks_confidence \
     --output ./outputs/corrected_polygons.geojson \
     --model_output ./outputs/suggestion_model.pt \
     --epochs 200 \
     --head fix
 ```
 
-### 2. `apply_model.py` — Apply a trained model and generate network
+Optional: add `--enable_remove` to train with the add+remove head (default is add-only).
 
-Loads a trained model, runs inference on specified tiles, re-polygonizes the predictions, and runs Tile2Net topology to produce both polygon and network GeoJSON outputs.
+### 2. `apply_model.py` — Apply a trained model and produce global outputs
+
+Loads a trained model, runs inference on specified tiles, re-polygonizes, runs Tile2Net topology on the new polygons, then merges the results into the original global polygon and network files (replacing old data for the input tiles). New network endpoints are snapped to the existing network within a configurable tolerance.
 
 ```bash
 python stewards_scripts/apply_model.py \
     --tile_ids 79337_97000 79315_97000 \
     --model_path ./outputs/suggestion_model.pt \
-    --tiles_dir ./path/to/tiles \
-    --t2n_dir ./path/to/masks_tile2net_polygons \
-    --conf_dir ./path/to/masks_confidence \
-    --output_polygons ./outputs/corrected_polygons.geojson \
-    --output_network ./outputs/corrected_network.geojson \
+    --tiles_dir /path/to/tiles \
+    --t2n_dir /path/to/masks_tile2net_polygons \
+    --conf_dir /path/to/masks_confidence \
+    --original_polygons /path/to/polygon_suggestions_zoom18.geojson \
+    --original_network /path/to/network_original.geojson \
+    --output_polygons ./outputs/corrected_polygons_global.geojson \
+    --output_network ./outputs/corrected_network_global.geojson \
     --head fix
 ```
 
 Tile IDs can also be derived from a GeoJSON file using `--geojson` instead of `--tile_ids`.
-'
 
-### This script can be ignored: 3. `polygon_to_network.py` — Convert polygons to network (standalone)
-
-Runs the Tile2Net topology engine on a polygon shapefile to produce a sidewalk network.
-
-```bash
-mkdir -p outputs && \
-python stewards_scripts/polygon_to_network.py \
-    --input ./path/to/polygons.shp \
-    --output dorchester_network \
-    --bbox -71.099395752 42.2808650053 -71.0307312012 42.3275853885
-```
-
-Output is saved to `outputs/<name>.shp`.
+Optional flags:
+- `--enable_remove` — use if the model was trained with the remove head
+- `--snap_tolerance 3.0` — snap distance in meters for connecting new network to existing (default: 3.0)
 
 ## Setup
 
@@ -97,5 +90,4 @@ All scripts should be run from the tile2net repository root:
 conda activate tile2net-env
 python stewards_scripts/train_from_suggestions.py --geojson ...
 python stewards_scripts/apply_model.py --tile_ids ...
-python stewards_scripts/polygon_to_network.py --input ...
 ```

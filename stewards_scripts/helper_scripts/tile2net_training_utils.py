@@ -421,27 +421,34 @@ class AugmentedDataset(Dataset):
 # ──────────────────────────────────────────────
 
 class ResidualFixNet(nn.Module):
-    """Pretrained encoder U-Net with residual connection and dual heads.
+    """Pretrained encoder U-Net with residual connection and dual/triple heads.
 
     - Frozen ResNet34 encoder (pretrained on ImageNet)
     - 5-channel input: RGB (pretrained) + T2N mask + confidence (zero-init)
-    - Trainable decoder + dual 1×1 heads
+    - Trainable decoder + dual 1×1 heads (+ optional remove head)
     - head_full: when warm_start_t2n=True → residual σ(logit(T2N) + Δ)
                  when warm_start_t2n=False → direct σ(logits)
-    - head_fix:  direct → σ(logits)
+    - head_fix:  direct → σ(logits) — predicts pixels to ADD
+    - head_remove (optional): direct → σ(logits) — predicts pixels to REMOVE
 
     Parameters
     ----------
     warm_start_t2n : bool (default False)
         If True, full head uses residual on T2N: σ(logit(T2N) + Δ).
         If False, full head predicts GT directly: σ(logits).
+    enable_remove : bool (default False)
+        If True, adds a third head (head_remove) for predicting pixel removal.
+        forward() returns 3 outputs: (out_full, out_fix, out_remove).
+        If False, forward() returns 2 outputs as before: (out_full, out_fix).
     """
 
     def __init__(self, encoder_name="resnet34", encoder_weights="imagenet",
-                 freeze_encoder=True, warm_start_t2n=False, eps=1e-6):
+                 freeze_encoder=True, warm_start_t2n=False, eps=1e-6,
+                 enable_remove=False):
         super().__init__()
         self.eps = eps
         self.warm_start_t2n = warm_start_t2n
+        self.enable_remove = enable_remove
 
         # Build a U-Net with 2 output classes (we'll replace the head)
         self.unet = smp.Unet(
@@ -482,7 +489,11 @@ class ResidualFixNet(nn.Module):
         decoder_out_ch = self.unet.segmentation_head[0].in_channels
 
         self.head_full = nn.Conv2d(decoder_out_ch, 1, 1)  # full prediction
-        self.head_fix  = nn.Conv2d(decoder_out_ch, 1, 1)  # fix mask
+        self.head_fix  = nn.Conv2d(decoder_out_ch, 1, 1)  # fix mask (add pixels)
+
+        # Optional remove head
+        if self.enable_remove:
+            self.head_remove = nn.Conv2d(decoder_out_ch, 1, 1)  # remove mask
 
         # Zero-init head_full when using warm start so initial delta ≈ 0 → output ≈ T2N
         if self.warm_start_t2n:
@@ -502,8 +513,13 @@ class ResidualFixNet(nn.Module):
 
         Returns
         -------
-        out_full : (B, 1, H, W)  — corrected segmentation (sigmoid)
-        out_fix  : (B, 1, H, W)  — fix-only mask (sigmoid)
+        If enable_remove=False (default):
+            out_full : (B, 1, H, W)  — corrected segmentation (sigmoid)
+            out_fix  : (B, 1, H, W)  — fix-only mask (sigmoid)
+        If enable_remove=True:
+            out_full   : (B, 1, H, W)
+            out_fix    : (B, 1, H, W)  — pixels to ADD
+            out_remove : (B, 1, H, W)  — pixels to REMOVE
         """
         # Forward through encoder + decoder (skip SMP's head)
         features = self.unet.encoder(x)
@@ -518,8 +534,12 @@ class ResidualFixNet(nn.Module):
         else:
             out_full = torch.sigmoid(logits_full)
 
-        # Fix head (always direct)
+        # Fix head (always direct) — predicts pixels to add
         out_fix = torch.sigmoid(self.head_fix(decoder_out))
+
+        if self.enable_remove:
+            out_remove = torch.sigmoid(self.head_remove(decoder_out))
+            return out_full, out_fix, out_remove
 
         return out_full, out_fix
 
@@ -565,18 +585,29 @@ def focal_loss(pred, target, gamma=2.0, alpha=0.75):
 
 
 def combined_loss(pred_full, pred_fix, tgt_full, tgt_fix,
+                  pred_remove=None, tgt_remove=None,
                   tversky_alpha=0.3, tversky_beta=0.7,
                   focal_gamma=2.0, focal_alpha=0.75,
-                  w_full=1.0, w_fix=0.5):
-    """Combined loss for dual-head model.
+                  w_full=1.0, w_fix=0.5, w_remove=0.5):
+    """Combined loss for dual/triple-head model.
 
-    w_full, w_fix : relative weights of the two heads
+    w_full, w_fix, w_remove : relative weights of the heads.
+    pred_remove, tgt_remove : optional — only used when enable_remove=True.
     """
     loss_full = tversky_loss(pred_full, tgt_full,
                              alpha=tversky_alpha, beta=tversky_beta)
     loss_fix = focal_loss(pred_fix, tgt_fix,
                           gamma=focal_gamma, alpha=focal_alpha)
-    return w_full * loss_full + w_fix * loss_fix, loss_full.item(), loss_fix.item()
+    total = w_full * loss_full + w_fix * loss_fix
+
+    l_remove = 0.0
+    if pred_remove is not None and tgt_remove is not None:
+        loss_remove = focal_loss(pred_remove, tgt_remove,
+                                 gamma=focal_gamma, alpha=focal_alpha)
+        total = total + w_remove * loss_remove
+        l_remove = loss_remove.item()
+
+    return total, loss_full.item(), loss_fix.item(), l_remove
 
 
 # ──────────────────────────────────────────────
@@ -765,7 +796,14 @@ def display_predictions(model, tile_ids, device, title="Model Predictions",
         inp, tgt_full, tgt_fixes, _ = eval_ds[i]
 
         with torch.no_grad():
-            pred_full, pred_fix = model(inp.unsqueeze(0).to(device))
+            outputs = model(inp.unsqueeze(0).to(device))
+        has_remove = hasattr(model, 'enable_remove') and model.enable_remove
+        if has_remove:
+            pred_full, pred_fix, pred_remove = outputs
+            pred_remove_np = pred_remove[0, 0].cpu().numpy()
+        else:
+            pred_full, pred_fix = outputs
+            pred_remove_np = None
         pred_full_np = pred_full[0, 0].cpu().numpy()
         pred_fix_np  = pred_fix[0, 0].cpu().numpy()
 
@@ -785,7 +823,10 @@ def display_predictions(model, tile_ids, device, title="Model Predictions",
         pf_rec  = compute_recall(pf_bin, gt_mask)
         pf_riou, pf_rrec, _, _ = compute_refined_metrics(pf_bin, gt_mask)
 
-        px_bin = t2n_binary | (pred_fix_np > 0.5)
+        if pred_remove_np is not None:
+            px_bin = (t2n_binary & ~(pred_remove_np > 0.5)) | (pred_fix_np > 0.5)
+        else:
+            px_bin = t2n_binary | (pred_fix_np > 0.5)
         px_iou  = compute_iou(px_bin, gt_mask)
         px_rec  = compute_recall(px_bin, gt_mask)
         px_riou, px_rrec, _, _ = compute_refined_metrics(px_bin, gt_mask)
@@ -903,10 +944,12 @@ def evaluate_tiles(model, tile_ids, device,
 
     Runs the model on each tile, thresholds predictions, computes refined
     IoU/recall for both heads and the T2N baseline.
+    If the model has enable_remove=True, also evaluates the combined
+    add+remove correction: (t2n & ~remove) | add.
 
     Parameters
     ----------
-    model    : nn.Module — must return (out_full, out_fix) in [0, 1]
+    model    : nn.Module — returns (out_full, out_fix) or (out_full, out_fix, out_remove)
     tile_ids : list of str
     device   : torch.device
     zero_channels : list of int or None
@@ -923,6 +966,7 @@ def evaluate_tiles(model, tile_ids, device,
     All values are floats (NaN tiles excluded from mean).
     """
     model.eval()
+    has_remove = hasattr(model, 'enable_remove') and model.enable_remove
     ds = SidewalkFixDataset(tile_ids, zero_channels=zero_channels,
                             tiles_dir=tiles_dir, t2n_dir=t2n_dir,
                             conf_dir=conf_dir, gt_dir=gt_dir)
@@ -936,7 +980,15 @@ def evaluate_tiles(model, tile_ids, device,
         inp, _, _, tid = ds[i]
 
         with torch.no_grad():
-            pred_full, pred_fix = model(inp.unsqueeze(0).to(device))
+            outputs = model(inp.unsqueeze(0).to(device))
+
+        if has_remove:
+            pred_full, pred_fix, pred_remove = outputs
+            pred_remove_np = pred_remove[0, 0].cpu().numpy()
+        else:
+            pred_full, pred_fix = outputs
+            pred_remove_np = None
+
         pred_full_np = pred_full[0, 0].cpu().numpy()
         pred_fix_np  = pred_fix[0, 0].cpu().numpy()
 
@@ -944,21 +996,25 @@ def evaluate_tiles(model, tile_ids, device,
         t2n_binary = (inp_np[3] > 0.5).astype(bool)
         _, _, _, gt_mask = load_tile_data(tid, gt_dir=gt_dir)
 
+        # Fix combined mask: remove first, then add (option 2)
+        if pred_remove_np is not None:
+            fix_bin = (t2n_binary & ~(pred_remove_np > 0.5)) | (pred_fix_np > 0.5)
+        else:
+            fix_bin = t2n_binary | (pred_fix_np > 0.5)
+
         # Refined metrics
         t2n_riou, t2n_rrec, _, _ = compute_refined_metrics(t2n_binary, gt_mask)
         pf_riou, pf_rrec, _, _   = compute_refined_metrics(
             pred_full_np > 0.5, gt_mask)
-        px_riou, px_rrec, _, _   = compute_refined_metrics(
-            t2n_binary | (pred_fix_np > 0.5), gt_mask)
+        px_riou, px_rrec, _, _   = compute_refined_metrics(fix_bin, gt_mask)
 
         # Raw metrics
         t2n_iou = compute_iou(t2n_binary, gt_mask)
         t2n_rec = compute_recall(t2n_binary, gt_mask)
         pf_iou  = compute_iou(pred_full_np > 0.5, gt_mask)
         pf_rec  = compute_recall(pred_full_np > 0.5, gt_mask)
-        px_bin  = t2n_binary | (pred_fix_np > 0.5)
-        px_iou  = compute_iou(px_bin, gt_mask)
-        px_rec  = compute_recall(px_bin, gt_mask)
+        px_iou  = compute_iou(fix_bin, gt_mask)
+        px_rec  = compute_recall(fix_bin, gt_mask)
 
         accum['t2n_riou'].append(t2n_riou)
         accum['t2n_rrec'].append(t2n_rrec)
@@ -1079,9 +1135,22 @@ def train_model(model, train_tile_ids, val_ids, bucket_info, device,
           f"rIoU={val_baseline['t2n_riou']:.4f}  "
           f"rRec={val_baseline['t2n_rrec']:.4f}")
 
+    # Detect if model has remove head
+    has_remove = hasattr(model, 'enable_remove') and model.enable_remove
+    if has_remove:
+        print("Model mode: add + remove (triple head)")
+    else:
+        print("Model mode: add only (dual head)")
+
+    # Best-model checkpointing (based on val fix_riou)
+    import copy
+    best_val_riou = -1.0
+    best_state = copy.deepcopy(model.state_dict())
+    best_epoch = 0
+
     # History
     history = {
-        "loss": [], "loss_full": [], "loss_fix": [],
+        "loss": [], "loss_full": [], "loss_fix": [], "loss_remove": [],
         "train_full_riou": [], "train_full_rrec": [],
         "train_fix_riou": [], "train_fix_rrec": [],
         "val_full_riou": [], "val_full_rrec": [],
@@ -1092,16 +1161,26 @@ def train_model(model, train_tile_ids, val_ids, bucket_info, device,
     # Training loop
     model.train()
     for epoch in range(n_epochs):
-        epoch_loss, epoch_full, epoch_fix, n_batches = 0, 0, 0, 0
+        epoch_loss, epoch_full, epoch_fix, epoch_remove, n_batches = 0, 0, 0, 0, 0
 
         for batch_inp, batch_tgt_full, batch_tgt_fix, _ in train_dl:
             batch_inp = batch_inp.to(device)
             batch_tgt_full = batch_tgt_full.to(device)
             batch_tgt_fix = batch_tgt_fix.to(device)
 
-            pred_full, pred_fix = model(batch_inp)
-            loss, l_full, l_fix = combined_loss(pred_full, pred_fix,
-                                                 batch_tgt_full, batch_tgt_fix)
+            # Remove target: pixels in T2N but NOT in GT (pixels to erase)
+            pred_remove_out = None
+            tgt_remove = None
+            if has_remove:
+                pred_full, pred_fix, pred_remove_out = model(batch_inp)
+                t2n_ch = batch_inp[:, 3:4, :, :]
+                tgt_remove = (t2n_ch > 0.5).float() * (1.0 - batch_tgt_full)
+            else:
+                pred_full, pred_fix = model(batch_inp)
+
+            loss, l_full, l_fix, l_remove = combined_loss(
+                pred_full, pred_fix, batch_tgt_full, batch_tgt_fix,
+                pred_remove=pred_remove_out, tgt_remove=tgt_remove)
 
             optimizer.zero_grad()
             loss.backward()
@@ -1110,14 +1189,17 @@ def train_model(model, train_tile_ids, val_ids, bucket_info, device,
             epoch_loss += loss.item()
             epoch_full += l_full
             epoch_fix += l_fix
+            epoch_remove += l_remove
             n_batches += 1
 
         avg_loss = epoch_loss / n_batches
         avg_full = epoch_full / n_batches
         avg_fix = epoch_fix / n_batches
+        avg_remove = epoch_remove / n_batches if n_batches > 0 else 0
         history["loss"].append(avg_loss)
         history["loss_full"].append(avg_full)
         history["loss_fix"].append(avg_fix)
+        history["loss_remove"].append(avg_remove)
 
         # Refined metrics every eval_every epochs + first + last
         do_eval = ((epoch == 0) or ((epoch + 1) % eval_every == 0)
@@ -1141,6 +1223,12 @@ def train_model(model, train_tile_ids, val_ids, bucket_info, device,
             history["val_fix_riou"].append(val_m['fix_riou'])
             history["val_fix_rrec"].append(val_m['fix_rrec'])
             history["metric_epochs"].append(epoch + 1)
+
+            # Best-model checkpoint
+            if val_m['fix_riou'] > best_val_riou:
+                best_val_riou = val_m['fix_riou']
+                best_state = copy.deepcopy(model.state_dict())
+                best_epoch = epoch + 1
 
             model.train()
 
@@ -1171,9 +1259,14 @@ def train_model(model, train_tile_ids, val_ids, bucket_info, device,
             print(f"Epoch {epoch+1:3d}/{n_epochs}  loss={avg_loss:.4f}  "
                   f"(full={avg_full:.4f}  fix={avg_fix:.4f})")
 
+    # Restore best model
+    model.load_state_dict(best_state)
+    model.eval()
+
     print(f"\n── Final Summary ──")
     print(f"Loss reduction: {history['loss'][0]:.4f} → {history['loss'][-1]:.4f} "
           f"({(1 - history['loss'][-1]/history['loss'][0])*100:.1f}% decrease)")
+    print(f"Best val fix_riou: {best_val_riou:.4f} at epoch {best_epoch}")
 
     # Final full val evaluation
     print(f"\nEvaluating full validation set ({len(val_ids)} tiles)...")
@@ -1254,7 +1347,14 @@ def export_predictions(model, tile_ids, device,
         inp, _, _, tid = ds[i]
 
         with torch.no_grad():
-            pred_full, pred_fix = model(inp.unsqueeze(0).to(device))
+            outputs = model(inp.unsqueeze(0).to(device))
+        has_remove = hasattr(model, 'enable_remove') and model.enable_remove
+        if has_remove:
+            pred_full, pred_fix, pred_remove = outputs
+            pred_remove_np = pred_remove[0, 0].cpu().numpy()
+        else:
+            pred_full, pred_fix = outputs
+            pred_remove_np = None
         pred_full_np = pred_full[0, 0].cpu().numpy()
         pred_fix_np = pred_fix[0, 0].cpu().numpy()
 
@@ -1264,14 +1364,21 @@ def export_predictions(model, tile_ids, device,
         # Full head: threshold at 0.5
         full_mask = (pred_full_np > 0.5).astype(np.uint8) * 255
 
-        # Fix head: T2N | (pred_fix > 0.5)
+        # Fix head: remove first, then add
         fix_new = pred_fix_np > 0.5
-        fix_combined = (t2n_binary | fix_new).astype(np.uint8) * 255
+        if pred_remove_np is not None:
+            fix_combined = ((t2n_binary & ~(pred_remove_np > 0.5)) | fix_new).astype(np.uint8) * 255
+        else:
+            fix_combined = (t2n_binary | fix_new).astype(np.uint8) * 255
 
-        # Overlay: T2N = white, new fixes = pastel green, bg = black
+        # Overlay: T2N = white, new fixes = pastel green, removed = red, bg = black
         overlay = np.zeros((256, 256, 3), dtype=np.uint8)
         # T2N pixels → white
         overlay[t2n_binary] = [255, 255, 255]
+        # Removed pixels (in T2N but removed) → pastel red
+        if pred_remove_np is not None:
+            removed = t2n_binary & (pred_remove_np > 0.5)
+            overlay[removed] = [225, 150, 150]
         # New fix pixels (not in T2N) → pastel green #C1E1C1
         new_only = fix_new & ~t2n_binary
         overlay[new_only] = [193, 225, 193]
