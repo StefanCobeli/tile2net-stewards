@@ -29,9 +29,13 @@ python apply_model.py \
 """
 
 import argparse
+import os
 import sys
 import tempfile
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 import geopandas as gpd
 import numpy as np
@@ -294,20 +298,26 @@ def main():
                        help="GeoJSON file — tile IDs extracted from 'tile_id' column")
 
     # Model + data paths
-    parser.add_argument("--model_path", required=True, help="Path to trained model .pt")
-    parser.add_argument("--tiles_dir", required=True, help="RGB satellite tiles directory")
-    parser.add_argument("--t2n_dir", required=True, help="T2N rasterized polygon masks directory")
-    parser.add_argument("--conf_dir", required=True, help="T2N confidence masks directory")
+    parser.add_argument("--model_path", default=os.getenv("MODEL_PATH", "./outputs/suggestion_model.pt"),
+                        help="Path to trained model .pt")
+    parser.add_argument("--tiles_dir", default=os.getenv("TILES_DIR"),
+                        help="RGB satellite tiles directory")
+    parser.add_argument("--t2n_dir", default=os.getenv("T2N_DIR"),
+                        help="T2N rasterized polygon masks directory")
+    parser.add_argument("--conf_dir", default=os.getenv("CONF_DIR"),
+                        help="T2N confidence masks directory")
 
     # Original global files
-    parser.add_argument("--original_polygons", required=True,
+    parser.add_argument("--original_polygons", default=os.getenv("ORIGINAL_POLYGONS"),
                         help="Original global polygon GeoJSON to update")
-    parser.add_argument("--original_network", required=True,
+    parser.add_argument("--original_network", default=os.getenv("ORIGINAL_NETWORK"),
                         help="Original global network GeoJSON to update")
 
     # Outputs
-    parser.add_argument("--output_polygons", required=True, help="Output global polygon GeoJSON path")
-    parser.add_argument("--output_network", required=True, help="Output global network GeoJSON path")
+    parser.add_argument("--output_polygons", default="./outputs/corrected_polygons_global.geojson",
+                        help="Output global polygon GeoJSON path")
+    parser.add_argument("--output_network", default="./outputs/corrected_network_global.geojson",
+                        help="Output global network GeoJSON path")
 
     # Options
     parser.add_argument("--head", choices=["fix", "full"], default="fix",
@@ -318,6 +328,11 @@ def main():
                         help="Snap tolerance in meters for connecting networks (default: 3.0)")
 
     args = parser.parse_args()
+
+    # Validate required paths
+    for arg_name in ["tiles_dir", "t2n_dir", "conf_dir", "original_polygons", "original_network"]:
+        if getattr(args, arg_name) is None:
+            parser.error(f"--{arg_name} is required (set via CLI or .env)")
 
     # ── Step 1: Get zoom-18 tile IDs ──
     if args.geojson:

@@ -15,9 +15,13 @@ python stewards_scripts/generate_suggestions.py \
 
 import argparse
 import math
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 import geopandas as gpd
 import pyproj
@@ -69,11 +73,11 @@ def main():
         description="Generate polygon modification suggestions for sidewalk polygons."
     )
 
-    parser.add_argument("--input", required=True,
+    parser.add_argument("--input", default=os.getenv("INPUT_POLYGONS"),
                         help="Input polygon file (GeoJSON or SHP)")
-    parser.add_argument("--tiles_dir", required=True,
+    parser.add_argument("--tiles_dir", default=os.getenv("TILES_DIR"),
                         help="Directory with zoom-19 tile images (*.jpg)")
-    parser.add_argument("--output", required=True,
+    parser.add_argument("--output", default="./outputs/polygon_suggestions_zoom18.geojson",
                         help="Output GeoJSON path")
 
     # Suggestion parameters
@@ -99,6 +103,11 @@ def main():
                         help="Max road overlap ratio — above this, keep as crosswalk (default: 0.75)")
 
     args = parser.parse_args()
+
+    # Validate required paths
+    for arg_name in ["input", "tiles_dir"]:
+        if getattr(args, arg_name) is None:
+            parser.error(f"--{arg_name} is required (set via CLI or .env)")
 
     # ── Step 1: Load input polygons ──
     print(f"Loading polygons: {args.input}")

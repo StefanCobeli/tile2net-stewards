@@ -15,9 +15,13 @@ python train_from_suggestions.py \
 
 import argparse
 import math
+import os
 import sys
 import tempfile
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 import cv2
 import geopandas as gpd
@@ -317,18 +321,29 @@ def main():
     parser = argparse.ArgumentParser(
         description="Train a sidewalk fix model from polygon suggestions."
     )
-    parser.add_argument("--geojson", required=True, help="Input GeoJSON with polygon suggestions")
-    parser.add_argument("--tiles_dir", required=True, help="RGB satellite tiles directory")
-    parser.add_argument("--t2n_dir", required=True, help="T2N rasterized polygon masks directory")
-    parser.add_argument("--conf_dir", required=True, help="T2N confidence masks directory")
-    parser.add_argument("--output", required=True, help="Output GeoJSON path")
-    parser.add_argument("--model_output", required=True, help="Output model .pt path")
+    parser.add_argument("--geojson", default=os.getenv("SUGGESTION_GEOJSON"),
+                        help="Input GeoJSON with polygon suggestions")
+    parser.add_argument("--tiles_dir", default=os.getenv("TILES_DIR"),
+                        help="RGB satellite tiles directory")
+    parser.add_argument("--t2n_dir", default=os.getenv("T2N_DIR"),
+                        help="T2N rasterized polygon masks directory")
+    parser.add_argument("--conf_dir", default=os.getenv("CONF_DIR"),
+                        help="T2N confidence masks directory")
+    parser.add_argument("--output", default="./outputs/corrected_polygons.geojson",
+                        help="Output GeoJSON path")
+    parser.add_argument("--model_output", default=os.getenv("MODEL_PATH", "./outputs/suggestion_model.pt"),
+                        help="Output model .pt path")
     parser.add_argument("--epochs", type=int, default=200, help="Training epochs (default: 200)")
     parser.add_argument("--head", choices=["fix", "full"], default="fix",
                         help="Model head to use (default: fix)")
     parser.add_argument("--enable_remove", action="store_true",
                         help="Enable remove head (add+remove mode)")
     args = parser.parse_args()
+
+    # Validate required paths
+    for arg_name in ["geojson", "tiles_dir", "t2n_dir", "conf_dir"]:
+        if getattr(args, arg_name) is None:
+            parser.error(f"--{arg_name} is required (set via CLI or .env)")
 
     # ── Step 1: Load input GeoJSON ──
     print(f"Loading GeoJSON: {args.geojson}")

@@ -21,14 +21,6 @@ from tqdm import tqdm
 # Satellite: {tile_id}.jpg
 # Confidence: {tile_id}.png  (single-channel grayscale, 0–255)
 
-BASE_DIR = (
-    "/Users/stefancobeli/Desktop/Research/GNN_Sidewalks/"
-    "tile2net-main-private/tile2net_data_files/boston_data_sources/dorchester_exports"
-)
-DEFAULT_TILES_DIR = os.path.join(BASE_DIR, "tiles")
-DEFAULT_T2N_DIR = os.path.join(BASE_DIR, "masks_tile2net")
-DEFAULT_CONF_DIR = os.path.join(BASE_DIR, "masks_confidence")
-DEFAULT_GT_DIR = os.path.join(BASE_DIR, "masks_groundtruth_polygons")
 
 
 def get_all_tile_ids(tiles_dir=None, t2n_dir=None, conf_dir=None, gt_dir=None):
@@ -37,10 +29,10 @@ def get_all_tile_ids(tiles_dir=None, t2n_dir=None, conf_dir=None, gt_dir=None):
     Assumes standardized naming: {tile_id}.jpg for satellite,
     {tile_id}.png for all masks.
     """
-    tiles_dir = tiles_dir or DEFAULT_TILES_DIR
-    t2n_dir = t2n_dir or DEFAULT_T2N_DIR
-    conf_dir = conf_dir or DEFAULT_CONF_DIR
-    gt_dir = gt_dir or DEFAULT_GT_DIR
+    tiles_dir = tiles_dir
+    t2n_dir = t2n_dir
+    conf_dir = conf_dir 
+    gt_dir = gt_dir 
 
     tile_ids_from_tiles = {
         f.replace(".jpg", "") for f in os.listdir(tiles_dir) if f.endswith(".jpg")
@@ -91,10 +83,10 @@ def load_tile_data(tile_id, tiles_dir=None, t2n_dir=None,
     t2n_mask   : (256, 256) bool — True = sidewalk
     gt_mask    : (256, 256) bool — True = sidewalk
     """
-    tiles_dir = tiles_dir or DEFAULT_TILES_DIR
-    t2n_dir = t2n_dir or DEFAULT_T2N_DIR
-    conf_dir = conf_dir or DEFAULT_CONF_DIR
-    gt_dir = gt_dir or DEFAULT_GT_DIR
+    tiles_dir = tiles_dir 
+    t2n_dir = t2n_dir 
+    conf_dir = conf_dir 
+    gt_dir = gt_dir 
 
     satellite = np.array(
         Image.open(os.path.join(tiles_dir, f"{tile_id}.jpg")).convert("RGB")

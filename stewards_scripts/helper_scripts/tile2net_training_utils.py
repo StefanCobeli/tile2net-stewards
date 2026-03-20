@@ -994,7 +994,9 @@ def evaluate_tiles(model, tile_ids, device,
 
         inp_np = inp.numpy()
         t2n_binary = (inp_np[3] > 0.5).astype(bool)
-        _, _, _, gt_mask = load_tile_data(tid, gt_dir=gt_dir)
+        _, _, _, gt_mask = load_tile_data(tid, tiles_dir=tiles_dir,
+                                              t2n_dir=t2n_dir, conf_dir=conf_dir,
+                                              gt_dir=gt_dir)
 
         # Fix combined mask: remove first, then add (option 2)
         if pred_remove_np is not None:
