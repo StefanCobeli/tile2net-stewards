@@ -1,6 +1,6 @@
 # Stewards Scripts
 
-Two scripts for training and applying sidewalk polygon fix models.
+Three scripts for generating suggestions, training, and applying sidewalk polygon fix models.
 
 ## Scripts
 
@@ -46,6 +46,25 @@ Optional flags:
 - `--enable_remove` — use if the model was trained with the remove head
 - `--snap_tolerance 3.0` — snap distance in meters for connecting new network to existing (default: 3.0)
 
+
+### 0. `generate_suggestions.py` — Generate polygon suggestions
+
+Takes an input polygon file (GeoJSON or SHP), clips polygons to zoom-18 tiles, generates elongation suggestions, and saves the result with `tile_id` and `n_suggestion` attributes. Filters to sidewalks only if the input has an `f_type` column.
+
+```bash
+python stewards_scripts/generate_suggestions.py \
+    --input /path/to/polygons.shp \
+    --tiles_dir /path/to/tiles \
+    --output ./outputs/polygon_suggestions_zoom18.geojson
+```
+
+Optional flags:
+- `--elongation_dist 50` — extension distance in meters (default: 50)
+- `--convexity_threshold 0.8` — skip non-convex polygons (default: 0.8)
+- `--max_elongate N` — limit elongation suggestions per tile (default: unlimited)
+- `--epsg_utm 32619` — UTM projection code (default: 32619 = Boston)
+
+
 ## Setup
 
 ### 1. Clone tile2net
@@ -88,6 +107,7 @@ All scripts should be run from the tile2net repository root:
 
 ```bash
 conda activate tile2net-env
+python stewards_scripts/generate_suggestions.py --input ...
 python stewards_scripts/train_from_suggestions.py --geojson ...
 python stewards_scripts/apply_model.py --tile_ids ...
 ```

@@ -177,17 +177,21 @@ def clip_polygons_to_tile(gdf_polygons, bounds):
     keep_idx = []
     for idx, row in subset.iterrows():
         clipped = row.geometry.intersection(tile_box)
-        if clipped is not None and not clipped.is_empty:
+        if clipped is None or clipped.is_empty:
+            continue
+        if clipped.geom_type in ("Polygon", "MultiPolygon"):
             clipped_geoms.append(clipped)
             keep_idx.append(idx)
+        elif clipped.geom_type == "GeometryCollection":
+            polys = [g for g in clipped.geoms
+                     if g.geom_type in ("Polygon", "MultiPolygon")]
+            if polys:
+                clipped_geoms.append(unary_union(polys))
+                keep_idx.append(idx)
     if not clipped_geoms:
         return subset.iloc[:0]
     result = subset.loc[keep_idx].copy()
     result.geometry = clipped_geoms
-    # Filter out non-polygon geometries (Points/Lines from clipping edges)
-    result = result[result.geometry.apply(
-        lambda g: g.geom_type in ("Polygon", "MultiPolygon")
-    )].copy()
     return result
 
 
