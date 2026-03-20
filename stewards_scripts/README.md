@@ -46,7 +46,6 @@ Optional flags:
 - `--enable_remove` — use if the model was trained with the remove head
 - `--snap_tolerance 3.0` — snap distance in meters for connecting new network to existing (default: 3.0)
 
-
 ### 0. `generate_suggestions.py` — Generate polygon suggestions
 
 Takes an input polygon file (GeoJSON or SHP), clips polygons to zoom-18 tiles, generates elongation suggestions, and saves the result with `tile_id` and `n_suggestion` attributes. Filters to sidewalks only if the input has an `f_type` column.

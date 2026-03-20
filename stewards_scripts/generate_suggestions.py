@@ -90,6 +90,14 @@ def main():
     parser.add_argument("--epsg_utm", type=int, default=32619,
                         help="UTM EPSG code for projection (default: 32619 = Boston)")
 
+    # Road filtering
+    parser.add_argument("--filter_across_roads", action="store_true",
+                        help="Filter suggestions that cross road polygons")
+    parser.add_argument("--road_overlap_min", type=float, default=0.25,
+                        help="Min road overlap ratio to start filtering (default: 0.25)")
+    parser.add_argument("--road_overlap_max", type=float, default=0.75,
+                        help="Max road overlap ratio — above this, keep as crosswalk (default: 0.75)")
+
     args = parser.parse_args()
 
     # ── Step 1: Load input polygons ──
@@ -101,8 +109,12 @@ def main():
         gdf_polys = gdf_polys.to_crs("EPSG:4326")
     print(f"  {len(gdf_polys)} polygons loaded")
 
-    # Filter to sidewalks only
+    # Separate roads for filtering, then keep only sidewalks
+    gdf_roads = None
     if "f_type" in gdf_polys.columns:
+        if args.filter_across_roads:
+            gdf_roads = gdf_polys[gdf_polys["f_type"] == "road"].copy()
+            print(f"  Road polygons for filtering: {len(gdf_roads)}")
         before = len(gdf_polys)
         gdf_polys = gdf_polys[gdf_polys["f_type"] == "sidewalk"].copy()
         print(f"  Filtered to sidewalks: {len(gdf_polys)} (dropped {before - len(gdf_polys)} roads/crosswalks)")
@@ -128,6 +140,7 @@ def main():
     )
 
     all_rows = []
+    n_road_filtered_total = [0]  # mutable for inner scope access
 
     for px, py in tqdm(zoom_18_tiles, desc="Processing zoom-18 tiles"):
         tile_id_18 = f"{px}_{py}"
@@ -161,8 +174,20 @@ def main():
             convexity_threshold=args.convexity_threshold,
         )
 
+        # Get road union for this tile (if filtering enabled)
+        tile_roads_union = None
+        if gdf_roads is not None and len(gdf_roads) > 0:
+            tile_box = shapely_box(*bounds)
+            tile_roads = gdf_roads[gdf_roads.intersects(tile_box)]
+            if len(tile_roads) > 0:
+                from shapely.ops import unary_union
+                valid_roads = [g.buffer(0) if not g.is_valid else g for g in tile_roads.geometry.values]
+                tile_roads_union = unary_union(valid_roads)
+
         # Add suggestion polygons (n_suggestion=1..N)
-        for i, sug in enumerate(suggestions, start=1):
+        n_filtered_roads = 0
+        sug_idx = 0
+        for sug in suggestions:
             mod_poly_utm = sug["modified_polys"].loc[sug["poly_row_idx"], "geometry"]
             # Get only the elongation (subtract original polygon)
             orig_poly_utm = tile_polys_proj.loc[sug["poly_row_idx"], "geometry"]
@@ -170,16 +195,32 @@ def main():
             # Convert to 4326
             mod_poly_4326 = shapely_transform(_utm_to_4326.transform, elongation_only)
 
+            # Road overlap filter
+            if tile_roads_union is not None and not mod_poly_4326.is_empty:
+                sug_geom = mod_poly_4326.buffer(0) if not mod_poly_4326.is_valid else mod_poly_4326
+                sug_area = sug_geom.area
+                if sug_area > 0:
+                    road_overlap = sug_geom.intersection(tile_roads_union).area / sug_area
+                    if args.road_overlap_min <= road_overlap <= args.road_overlap_max:
+                        n_filtered_roads += 1
+                        continue
+
+            sug_idx += 1
             all_rows.append({
                 "geometry": mod_poly_4326,
                 "tile_id": tile_id_18,
-                "n_suggestion": i,
+                "n_suggestion": sug_idx,
             })
+
+        if n_filtered_roads > 0:
+            n_road_filtered_total[0] += n_filtered_roads
 
     # ── Step 4: Save output ──
     n_orig = sum(1 for r in all_rows if r["n_suggestion"] == 0)
     n_sug = sum(1 for r in all_rows if r["n_suggestion"] > 0)
     print(f"\nTotal polygons: {len(all_rows)} ({n_orig} original, {n_sug} suggestions)")
+    if n_road_filtered_total[0] > 0:
+        print(f"  Filtered {n_road_filtered_total[0]} suggestions crossing roads")
 
     gdf_out = gpd.GeoDataFrame(all_rows, crs="EPSG:4326")
 
